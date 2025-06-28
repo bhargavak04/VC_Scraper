@@ -33,6 +33,10 @@ os.makedirs(app.config['RESULTS_FOLDER'], exist_ok=True)
 
 # Global variables for tracking progress
 current_task = None
+
+@app.route('/health')
+def health_check():
+    return jsonify({'status': 'ok', 'message': 'Application is running'})
 task_status = {
     'running': False,
     'current_investor': '',
