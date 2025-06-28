@@ -25,8 +25,9 @@ RUN playwright install-deps chromium
 # Copy application code
 COPY . .
 
-# Create necessary directories
-RUN mkdir -p uploads results templates
+# Copy templates and create necessary directories
+COPY templates templates
+RUN mkdir -p uploads results
 
 # Expose port
 EXPOSE 5000
