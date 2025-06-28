@@ -34,6 +34,8 @@ os.makedirs(app.config['RESULTS_FOLDER'], exist_ok=True)
 # Global variables for tracking progress
 current_task = None
 
+import os
+
 @app.route('/health')
 def health_check():
     return jsonify({'status': 'ok', 'message': 'Application is running'})
@@ -1075,4 +1077,4 @@ if __name__ == '__main__':
     
     # Get port from environment variable (Railway sets this automatically)
     port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port, debug=False)
+    app.run(host='0.0.0.0', port=port, debug=True)
