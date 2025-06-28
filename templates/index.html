@@ -51,17 +51,37 @@
             resultsFileText.textContent = '';
 
             try {
-                const response = await fetch('/start_scraping', {
+                // Step 1: Upload the file
+                const uploadResponse = await fetch('/upload', {
                     method: 'POST',
                     body: formData
                 });
-                const data = await response.json();
+                const uploadData = await uploadResponse.json();
 
-                if (data.success) {
+                if (!uploadData.success) {
+                    statusText.textContent = `Upload Error: ${uploadData.error}`;
+                    stopButton.style.display = 'none';
+                    return;
+                }
+
+                const filename = uploadData.filename;
+                statusText.textContent = 'File uploaded. Starting scraping...';
+
+                // Step 2: Start scraping with the uploaded filename
+                const startScrapingResponse = await fetch('/start_scraping', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ filename: filename })
+                });
+                const startScrapingData = await startScrapingResponse.json();
+
+                if (startScrapingData.success) {
                     statusText.textContent = 'Scraping in progress...';
                     startStatusUpdates();
                 } else {
-                    statusText.textContent = `Error: ${data.error}`;
+                    statusText.textContent = `Scraping Start Error: ${startScrapingData.error}`;
                     stopButton.style.display = 'none';
                 }
             } catch (error) {
