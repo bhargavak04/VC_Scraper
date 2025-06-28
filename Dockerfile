@@ -34,6 +34,3 @@ EXPOSE 5000
 # Set environment variables
 ENV PYTHONUNBUFFERED=1
 ENV PORT=5000
-
-# Run the application
-CMD gunicorn app:app --bind 0.0.0.0:$PORT
