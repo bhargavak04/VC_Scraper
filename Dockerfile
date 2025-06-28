@@ -25,9 +25,8 @@ RUN playwright install-deps chromium
 # Copy application code
 COPY . .
 
-# Copy templates and create necessary directories
-COPY templates templates
-RUN mkdir -p uploads results
+# Create necessary directories
+RUN mkdir -p uploads results templates
 
 # Expose port
 EXPOSE 5000
@@ -37,4 +36,4 @@ ENV PYTHONUNBUFFERED=1
 ENV PORT=5000
 
 # Run the application
-CMD gunicorn app:app --bind 0.0.0.0:$PORT
+CMD ["python", "app.py"]

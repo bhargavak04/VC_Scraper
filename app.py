@@ -14,7 +14,6 @@ import json
 from typing import List, Dict, Set
 from flask import Flask, render_template, request, send_file, jsonify, redirect, url_for
 from werkzeug.utils import secure_filename
-from werkzeug.exceptions import HTTPException
 import threading
 from datetime import datetime
 import traceback
@@ -1071,24 +1070,5 @@ if __name__ == '__main__':
         f.write(template_content)
     
     # Get port from environment variable (Railway sets this automatically)
-@app.errorhandler(500)
-def internal_server_error(e):
-    logger.exception("Internal Server Error:")
-    return jsonify(error="An internal server error occurred."), 500
-
-@app.errorhandler(413)
-def request_entity_too_large(e):
-    logger.warning(f"Request entity too large: {e}")
-    return jsonify(error="File too large. Maximum size is 16MB."), 413
-
-@app.errorhandler(Exception)
-def handle_exception(e):
-    # Pass through HTTP errors
-    if isinstance(e, HTTPException):
-        return jsonify(error=e.description), e.code
-    logger.exception("Unhandled exception:")
-    return jsonify(error="An unexpected error occurred."), 500
-
-if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=False)
