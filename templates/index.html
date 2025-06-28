@@ -7,6 +7,150 @@
 </head>
 <body>
     <h1>Welcome to the Investor Scraper!</h1>
-    <p>This is a placeholder page. The application will be accessible here.</p>
+    <h1>Investor Scraper</h1>
+    <form id="upload-form" enctype="multipart/form-data">
+        <input type="file" name="file" id="file-input" accept=".csv,.xlsx" required>
+        <button type="submit">Start Scraping</button>
+    </form>
+    <div id="status">
+        <p>Status: <span id="status-text">Idle</span></p>
+        <p>Progress: <span id="progress-text">0/0</span></p>
+        <p>Current Investor: <span id="current-investor-text">N/A</span></p>
+        <p>Emails Found: <span id="emails-found-text">0</span></p>
+        <p>Time Elapsed: <span id="time-elapsed-text">00:00:00</span></p>
+        <button id="stop-button" style="display:none;">Stop Scraping</button>
+    </div>
+    <div id="results">
+        <h3>Results</h3>
+        <p id="results-file-text"></p>
+        <ul id="error-list"></ul>
+    </div>
+
+    <script>
+        const uploadForm = document.getElementById('upload-form');
+        const fileInput = document.getElementById('file-input');
+        const statusText = document.getElementById('status-text');
+        const progressText = document.getElementById('progress-text');
+        const currentInvestorText = document.getElementById('current-investor-text');
+        const emailsFoundText = document.getElementById('emails-found-text');
+        const timeElapsedText = document.getElementById('time-elapsed-text');
+        const resultsFileText = document.getElementById('results-file-text');
+        const errorList = document.getElementById('error-list');
+        const stopButton = document.getElementById('stop-button');
+
+        let statusInterval;
+
+        uploadForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const formData = new FormData();
+            formData.append('file', fileInput.files[0]);
+
+            statusText.textContent = 'Uploading...';
+            stopButton.style.display = 'block';
+            errorList.innerHTML = '';
+            resultsFileText.textContent = '';
+
+            try {
+                const response = await fetch('/start_scraping', {
+                    method: 'POST',
+                    body: formData
+                });
+                const data = await response.json();
+
+                if (data.success) {
+                    statusText.textContent = 'Scraping in progress...';
+                    startStatusUpdates();
+                } else {
+                    statusText.textContent = `Error: ${data.error}`;
+                    stopButton.style.display = 'none';
+                }
+            } catch (error) {
+                statusText.textContent = `Network Error: ${error.message}`;
+                stopButton.style.display = 'none';
+            }
+        });
+
+        stopButton.addEventListener('click', async () => {
+            try {
+                const response = await fetch('/stop_scraping', {
+                    method: 'POST'
+                });
+                const data = await response.json();
+                if (data.success) {
+                    statusText.textContent = 'Scraping stopped by user.';
+                    clearInterval(statusInterval);
+                    stopButton.style.display = 'none';
+                } else {
+                    alert(`Error stopping: ${data.error}`);
+                }
+            } catch (error) {
+                alert(`Network error stopping: ${error.message}`);
+            }
+        });
+
+        function startStatusUpdates() {
+            clearInterval(statusInterval); // Clear any existing interval
+            statusInterval = setInterval(fetchStatus, 2000); // Update every 2 seconds
+        }
+
+        async function fetchStatus() {
+            try {
+                const response = await fetch('/status');
+                const data = await response.json();
+
+                statusText.textContent = data.running ? 'Scraping in progress...' : 'Idle';
+                progressText.textContent = `${data.progress}/${data.total}`;
+                currentInvestorText.textContent = data.current_investor || 'N/A';
+                emailsFoundText.textContent = data.emails_found;
+
+                if (data.start_time) {
+                    const startTime = new Date(data.start_time);
+                    const now = new Date();
+                    const elapsed = Math.floor((now - startTime) / 1000);
+                    const hours = Math.floor(elapsed / 3600);
+                    const minutes = Math.floor((elapsed % 3600) / 60);
+                    const seconds = elapsed % 60;
+                    timeElapsedText.textContent = 
+                        `${String(hours).padStart(2, '0')}:
+                         ${String(minutes).padStart(2, '0')}:
+                         ${String(seconds).padStart(2, '0')}`;
+                } else {
+                    timeElapsedText.textContent = '00:00:00';
+                }
+
+                if (data.results_file) {
+                    resultsFileText.innerHTML = `Download Results: <a href="/download/${data.results_file}">${data.results_file}</a>`;
+                }
+
+                errorList.innerHTML = '';
+                if (data.errors && data.errors.length > 0) {
+                    data.errors.forEach(error => {
+                        const li = document.createElement('li');
+                        li.textContent = error;
+                        errorList.appendChild(li);
+                    });
+                }
+
+                if (!data.running && data.current_investor === 'Completed') {
+                    statusText.textContent = 'Scraping Completed!';
+                    clearInterval(statusInterval);
+                    stopButton.style.display = 'none';
+                } else if (!data.running && data.current_investor !== 'Completed' && data.progress > 0) {
+                    statusText.textContent = 'Scraping stopped.';
+                    clearInterval(statusInterval);
+                    stopButton.style.display = 'none';
+                }
+
+            } catch (error) {
+                console.error('Error fetching status:', error);
+                statusText.textContent = `Error fetching status: ${error.message}`;
+                clearInterval(statusInterval);
+                stopButton.style.display = 'none';
+            }
+        }
+
+        // Initial status fetch on page load
+        fetchStatus();
+    </script>
 </body>
 </html>
