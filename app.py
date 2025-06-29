@@ -62,6 +62,7 @@ class InvestorEmailScraper:
             'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:120.0) Gecko/20100101 Firefox/120.0',
             'Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:120.0) Gecko/20100101 Firefox/120.0'
         ]
+        self.playwright_instance = None
         
     def parse_investor_list(self, raw_text):
         """Parse the raw investor list into individual names/companies"""
@@ -112,12 +113,21 @@ class InvestorEmailScraper:
                     filtered_emails.append(email)
         
         return list(set(filtered_emails))
+
+    async def close(self):
+        """Closes the Playwright instance."""
+        if self.playwright_instance:
+            await self.playwright_instance.stop()
+            self.playwright_instance = None
+            logger.info("Playwright instance closed.")
     
     async def create_browser_context(self):
         """Create a browser context with better stealth settings"""
         try:
-            p = await async_playwright().start()
-            browser = await p.chromium.launch(
+            if self.playwright_instance is None:
+                self.playwright_instance = await async_playwright().start()
+            
+            browser = await self.playwright_instance.chromium.launch(
                 headless=True,
                 args=[
                     '--no-sandbox',
@@ -144,7 +154,7 @@ class InvestorEmailScraper:
                 ignore_https_errors=True
             )
             
-            return p, browser, context
+            return browser, context
             
         except Exception as e:
             logger.error(f"Failed to create browser context: {e}")
@@ -156,8 +166,9 @@ class InvestorEmailScraper:
         
         # Try DuckDuckGo with retries
         for attempt in range(self.max_retries):
+            browser = context = page = None
             try:
-                p, browser, context = await self.create_browser_context()
+                browser, context = await self.create_browser_context()
                 page = await context.new_page()
                 
                 # Set page timeout
@@ -199,76 +210,27 @@ class InvestorEmailScraper:
                 """)
                 
                 urls.update(page_urls[:max_results])
-                await browser.close()
-                break  # Success, exit retry loop
-                
+                break # Break on success
+
             except Exception as e:
                 logger.error(f"DuckDuckGo search attempt {attempt + 1} failed: {e}")
-                if 'browser' in locals():
-                    try:
-                        await browser.close()
-                    except:
-                        pass
-                
                 if attempt == self.max_retries - 1:
-                    logger.error(f"DuckDuckGo search failed after {self.max_retries} attempts")
-                else:
-                    await asyncio.sleep(5)  # Wait before retry
-        
-        # Try Bing as fallback if DuckDuckGo failed
-        if not urls:
-            for attempt in range(self.max_retries):
-                try:
-                    p, browser, context = await self.create_browser_context()
-                    page = await context.new_page()
-                    
-                    search_url = f"https://www.bing.com/search?q={quote(query)}"
-                    await page.goto(search_url, wait_until='domcontentloaded', timeout=30000)
-                    
-                    # Wait for results
-                    await page.wait_for_selector('h2 a', timeout=15000)
-                    
-                    # Extract URLs
-                    page_urls = await page.evaluate("""
-                        () => {
-                            const results = [];
-                            const links = document.querySelectorAll('h2 a, .b_title a');
-                            for (let link of links) {
-                                const href = link.href;
-                                if (href && 
-                                    !href.includes('bing.com') && 
-                                    !href.includes('youtube.com') &&
-                                    !href.includes('facebook.com') &&
-                                    href.startsWith('http')) {
-                                    results.push(href);
-                                }
-                            }
-                            return [...new Set(results)];
-                        }
-                    """)
-                    
-                    urls.update(page_urls[:max_results])
+                    logger.error(f"Max retries reached for query: {query}")
+            finally:
+                if page:
+                    await page.close()
+                if context:
+                    await context.close()
+                if browser:
                     await browser.close()
-                    break
-                    
-                except Exception as e:
-                    logger.error(f"Bing search attempt {attempt + 1} failed: {e}")
-                    if 'browser' in locals():
-                        try:
-                            await browser.close()
-                        except:
-                            pass
-                    
-                    if attempt < self.max_retries - 1:
-                        await asyncio.sleep(5)
-        
-        return list(urls)[:max_results]
-    
+
+        return list(urls)
+                
     async def scrape_page_for_emails(self, url):
         """Scrape a webpage for email addresses with robust error handling"""
         for attempt in range(self.max_retries):
             try:
-                p, browser, context = await self.create_browser_context()
+                browser, context = await self.create_browser_context()
                 page = await context.new_page()
                 
                 # Set page timeout
@@ -606,6 +568,15 @@ def run_scraping_task(investor_names):
             'running': False,
             'current_investor': f'Error: {str(e)}'
         })
+    finally:
+        # Ensure scraper and loop are closed regardless of success or failure
+        if 'scraper' in locals() and scraper:
+            try:
+                loop.run_until_complete(scraper.close())
+            except Exception as close_e:
+                logger.error(f"Error closing scraper: {close_e}")
+        if 'loop' in locals() and loop:
+            loop.close()
 
 # HTML Template
 @app.route('/template')
