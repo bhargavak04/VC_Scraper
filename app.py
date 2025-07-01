@@ -34,11 +34,10 @@ os.makedirs(app.config['RESULTS_FOLDER'], exist_ok=True)
 # Global variables for tracking progress
 current_task = None
 
-import os
-
 @app.route('/health')
 def health_check():
     return jsonify({'status': 'ok', 'message': 'Application is running'})
+
 task_status = {
     'running': False,
     'current_investor': '',
@@ -90,27 +89,80 @@ class InvestorEmailScraper:
         
         return unique_investors
     
-    def extract_emails(self, text):
-        """Extract email addresses from text"""
+    def extract_emails(self, text, investor_name=None):
+        """Extract and validate email addresses from text"""
         email_pattern = r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'
         emails = re.findall(email_pattern, text, re.IGNORECASE)
         
-        # Filter out common false positives
+        # Enhanced filtering for better quality emails
         filtered_emails = []
         exclude_patterns = [
-            '@example.', '@test.', '@placeholder.', '@domain.',
+            # Generic/system emails
+            '@example.', '@test.', '@placeholder.', '@domain.', '@temp.',
+            'noreply@', 'no-reply@', 'donotreply@', 'support@', 'info@',
+            'hello@', 'contact@', 'admin@', 'webmaster@', 'sales@',
+            'marketing@', 'help@', 'service@', 'customerservice@',
+            
+            # Social media and big tech
             '@sentry.', '@facebook.', '@twitter.', '@linkedin.',
-            'noreply@', 'no-reply@', 'support@', 'info@',
             '@youtube.', '@instagram.', '@tiktok.', '@google.',
             '@microsoft.', '@apple.', '@amazon.', '@adobe.',
-            '@github.', '@stackoverflow.', '@reddit.', '@discord.'
+            '@github.', '@stackoverflow.', '@reddit.', '@discord.',
+            '@slack.', '@zoom.', '@teams.', '@skype.',
+            
+            # Tracking and analytics
+            '@traxcn.', '@analytics.', '@tracking.', '@pixel.',
+            '@googletagmanager.', '@googleanalytics.', '@hotjar.',
+            '@mixpanel.', '@segment.', '@amplitude.', '@intercom.',
+            
+            # Common false positives
+            'hi@traxcn', 'track@', 'pixel@', 'img@', 'image@',
+            'static@', 'cdn@', 'assets@', 'mail@mailgun',
+            'bounce@', '@mailgun.', '@sendgrid.', '@mailchimp.',
+            
+            # Newsletter/marketing platforms
+            '@constantcontact.', '@aweber.', '@convertkit.',
+            '@activecampaign.', '@klaviyo.', '@mailerlite.',
+        ]
+        
+        # Domain quality filters
+        low_quality_domains = [
+            'gmail.com', 'yahoo.com', 'hotmail.com', 'outlook.com',
+            'aol.com', 'live.com', 'msn.com', 'icloud.com'
         ]
         
         for email in emails:
             email = email.lower().strip()
-            if not any(exclude in email for exclude in exclude_patterns):
-                if len(email) > 5 and '.' in email.split('@')[1]:
-                    filtered_emails.append(email)
+            
+            # Skip if matches exclude patterns
+            if any(exclude in email for exclude in exclude_patterns):
+                continue
+                
+            # Basic validation
+            if len(email) < 5 or '@' not in email:
+                continue
+                
+            domain_part = email.split('@')[1]
+            
+            # Skip if domain doesn't have proper extension
+            if '.' not in domain_part or len(domain_part.split('.')[-1]) < 2:
+                continue
+            
+            # Skip obvious generic/low quality emails for companies
+            if investor_name and self.classify_investor_type(investor_name) == 'company':
+                if email.split('@')[1] in low_quality_domains:
+                    continue
+            
+            # Skip emails with too many dots or suspicious patterns
+            if email.count('.') > 3 or email.count('-') > 2:
+                continue
+                
+            # Skip emails that are just numbers
+            local_part = email.split('@')[0]
+            if local_part.isdigit():
+                continue
+                
+            filtered_emails.append(email)
         
         return list(set(filtered_emails))
 
@@ -160,74 +212,115 @@ class InvestorEmailScraper:
             logger.error(f"Failed to create browser context: {e}")
             raise
     
-    async def search_alternative_engines(self, query, max_results=10):
-        """Search using alternative search engines with better error handling"""
+    async def search_alternative_engines(self, query, max_results=15):
+        """Enhanced search with multiple engines and better URL filtering"""
         urls = set()
         
-        # Try DuckDuckGo with retries
-        for attempt in range(self.max_retries):
-            browser = context = page = None
-            try:
-                browser, context = await self.create_browser_context()
-                page = await context.new_page()
-                
-                # Set page timeout
-                page.set_default_timeout(30000)
-                
-                # DuckDuckGo search
-                search_url = f"https://duckduckgo.com/?q={quote(query)}"
-                await page.goto(search_url, wait_until='domcontentloaded', timeout=30000)
-                
-                # Wait for results with fallback
+        # Multiple search engines for better coverage
+        search_engines = [
+            {
+                'name': 'DuckDuckGo',
+                'url': f"https://duckduckgo.com/?q={quote(query)}",
+                'selectors': ['a[data-testid="result-title-a"]', 'h3 a', '.result__a']
+            },
+            {
+                'name': 'Bing',
+                'url': f"https://www.bing.com/search?q={quote(query)}",
+                'selectors': ['h2 a', '.b_algo h2 a', '.b_title a']
+            }
+        ]
+        
+        for engine in search_engines:
+            for attempt in range(self.max_retries):
+                browser = context = page = None
                 try:
-                    await page.wait_for_selector('a[data-testid="result-title-a"]', timeout=15000)
-                except:
-                    # Try alternative selector
-                    await page.wait_for_selector('h3 a', timeout=10000)
-                
-                # Extract URLs with multiple selectors
-                page_urls = await page.evaluate("""
-                    () => {
-                        const results = [];
-                        const selectors = ['a[data-testid="result-title-a"]', 'h3 a', '.result__a'];
-                        
-                        for (let selector of selectors) {
-                            const links = document.querySelectorAll(selector);
-                            for (let link of links) {
-                                const href = link.href;
-                                if (href && 
-                                    !href.includes('duckduckgo.com') && 
-                                    !href.includes('youtube.com') &&
-                                    !href.includes('facebook.com') &&
-                                    !href.includes('twitter.com') &&
-                                    href.startsWith('http')) {
-                                    results.push(href);
-                                }
-                            }
-                        }
-                        return [...new Set(results)];
-                    }
-                """)
-                
-                urls.update(page_urls[:max_results])
-                break # Break on success
+                    browser, context = await self.create_browser_context()
+                    page = await context.new_page()
+                    
+                    # Set page timeout
+                    page.set_default_timeout(30000)
+                    
+                    logger.info(f"Searching {engine['name']} for: {query}")
+                    await page.goto(engine['url'], wait_until='domcontentloaded', timeout=30000)
+                    
+                    # Wait for results
+                    await asyncio.sleep(3)
+                    
+                    # Extract URLs with quality filtering
+                    page_urls = await page.evaluate(f"""
+                        () => {{
+                            const results = [];
+                            const selectors = {json.dumps(engine['selectors'])};
+                            
+                            for (let selector of selectors) {{
+                                const links = document.querySelectorAll(selector);
+                                for (let link of links) {{
+                                    const href = link.href;
+                                    if (href && href.startsWith('http')) {{
+                                        // Filter out low-quality domains
+                                        const url = new URL(href);
+                                        const domain = url.hostname.toLowerCase();
+                                        
+                                        // Skip social media and low-quality sites
+                                        if (!domain.includes('youtube.com') &&
+                                            !domain.includes('facebook.com') &&
+                                            !domain.includes('twitter.com') &&
+                                            !domain.includes('instagram.com') &&
+                                            !domain.includes('tiktok.com') &&
+                                            !domain.includes('pinterest.com') &&
+                                            !domain.includes('reddit.com') &&
+                                            !domain.includes('wikipedia.org') &&
+                                            !domain.includes('duckduckgo.com') &&
+                                            !domain.includes('bing.com')) {{
+                                            results.push(href);
+                                        }}
+                                    }}
+                                }}
+                            }}
+                            return [...new Set(results)];
+                        }}
+                    """)
+                    
+                    # Prioritize company websites and professional platforms
+                    prioritized_urls = []
+                    other_urls = []
+                    
+                    for url in page_urls:
+                        domain = url.split('/')[2].lower()
+                        if any(indicator in domain for indicator in [
+                            'capital', 'ventures', 'partners', 'fund', 'invest',
+                            'linkedin.com', 'crunchbase.com', 'pitchbook.com'
+                        ]):
+                            prioritized_urls.append(url)
+                        else:
+                            other_urls.append(url)
+                    
+                    # Add prioritized URLs first
+                    urls.update(prioritized_urls[:5])
+                    urls.update(other_urls[:max_results-len(prioritized_urls)])
+                    
+                    break # Break on success
 
-            except Exception as e:
-                logger.error(f"DuckDuckGo search attempt {attempt + 1} failed: {e}")
-                if attempt == self.max_retries - 1:
-                    logger.error(f"Max retries reached for query: {query}")
-            finally:
-                if page:
-                    await page.close()
-                if context:
-                    await context.close()
-                if browser:
-                    await browser.close()
+                except Exception as e:
+                    logger.error(f"{engine['name']} search attempt {attempt + 1} failed: {e}")
+                    if attempt == self.max_retries - 1:
+                        logger.error(f"Max retries reached for {engine['name']} query: {query}")
+                finally:
+                    if page:
+                        await page.close()
+                    if context:
+                        await context.close()
+                    if browser:
+                        await browser.close()
+            
+            # Delay between search engines
+            if len(urls) < max_results:
+                await asyncio.sleep(random.uniform(3, 5))
 
         return list(urls)
                 
-    async def scrape_page_for_emails(self, url):
-        """Scrape a webpage for email addresses with robust error handling"""
+    async def scrape_page_for_emails(self, url, investor_name=None):
+        """Enhanced page scraping with better email extraction"""
         for attempt in range(self.max_retries):
             try:
                 browser, context = await self.create_browser_context()
@@ -258,34 +351,39 @@ class InvestorEmailScraper:
                 for element in soup(['script', 'style', 'nav', 'footer', 'header', 'advertisement']):
                     element.decompose()
                 
-                # Extract text
-                text = soup.get_text(separator=' ', strip=True)
-                
-                # Also check specific elements that commonly contain emails
-                email_selectors = [
-                    'a[href^="mailto:"]',
-                    '[class*="email"]',
-                    '[class*="contact"]',
-                    '[id*="email"]',
-                    '[id*="contact"]'
+                # Extract text from high-value sections first
+                priority_selectors = [
+                    '[class*="team"]', '[class*="contact"]', '[class*="about"]',
+                    '[class*="leadership"]', '[class*="management"]', '[class*="founder"]',
+                    '[class*="partner"]', '[id*="team"]', '[id*="contact"]',
+                    '[id*="about"]', 'main', 'article'
                 ]
                 
-                email_elements = []
-                for selector in email_selectors:
+                priority_text = ""
+                for selector in priority_selectors:
                     elements = soup.select(selector)
-                    email_elements.extend(elements)
+                    for element in elements:
+                        priority_text += element.get_text(separator=' ', strip=True) + " "
                 
-                element_text = ' '.join([elem.get_text() for elem in email_elements])
+                # Get all text as fallback
+                all_text = soup.get_text(separator=' ', strip=True)
                 
-                # Check href attributes for mailto links
+                # Extract emails from mailto links first (highest quality)
+                mailto_emails = []
                 mailto_links = soup.find_all('a', href=re.compile(r'^mailto:'))
-                mailto_emails = [link['href'].replace('mailto:', '') for link in mailto_links]
+                for link in mailto_links:
+                    email = link['href'].replace('mailto:', '').split('?')[0]  # Remove query params
+                    mailto_emails.append(email)
                 
-                combined_text = text + ' ' + element_text + ' ' + ' '.join(mailto_emails)
-                emails = self.extract_emails(combined_text)
+                # Extract emails from text
+                priority_emails = self.extract_emails(priority_text, investor_name)
+                all_emails = self.extract_emails(all_text, investor_name)
+                
+                # Combine and prioritize
+                combined_emails = list(set(mailto_emails + priority_emails + all_emails))
                 
                 await browser.close()
-                return emails
+                return combined_emails
                 
             except Exception as e:
                 logger.error(f"Error scraping {url} (attempt {attempt + 1}): {e}")
@@ -301,11 +399,12 @@ class InvestorEmailScraper:
         return []
     
     def classify_investor_type(self, name):
-        """Classify if the name is likely a person or company"""
+        """Enhanced investor type classification"""
         company_indicators = [
             'ventures', 'capital', 'fund', 'partners', 'group', 'corp', 'ltd',
             'inc', 'llc', 'bank', 'foundation', 'network', 'holdings', 'management',
-            'equity', 'investment', 'angels', 'vc', 'advisory', 'advisors'
+            'equity', 'investment', 'angels', 'vc', 'advisory', 'advisors',
+            'family office', 'wealth', 'asset', 'private equity', 'venture capital'
         ]
         
         name_lower = name.lower()
@@ -315,22 +414,26 @@ class InvestorEmailScraper:
             return 'person'
     
     async def find_emails_for_investor(self, investor_name):
-        """Find emails for a specific investor with multiple strategies"""
+        """Enhanced email finding with better search strategies"""
         logger.info(f"Searching for: {investor_name}")
         
         investor_type = self.classify_investor_type(investor_name)
         all_emails = set()
         
-        # Strategy 1: Search alternative engines
+        # Enhanced search queries
         if investor_type == 'person':
             queries = [
-                f'"{investor_name}" email contact',
-                f'"{investor_name}" investor contact'
+                f'"{investor_name}" email contact investor',
+                f'"{investor_name}" contact information',
+                f'"{investor_name}" linkedin investor email',
+                f'"{investor_name}" venture capital email'
             ]
         else:
             queries = [
-                f'"{investor_name}" contact email',
-                f'"{investor_name}" team contact'
+                f'"{investor_name}" contact email team',
+                f'"{investor_name}" investment contact',
+                f'"{investor_name}" portfolio team email',
+                f'"{investor_name}" partners contact'
             ]
         
         for query in queries:
@@ -338,22 +441,31 @@ class InvestorEmailScraper:
                 logger.info(f"Query: {query}")
                 
                 # Search using alternative engines
-                urls = await self.search_alternative_engines(query, max_results=5)
+                urls = await self.search_alternative_engines(query, max_results=8)
                 logger.info(f"Found {len(urls)} URLs from search engines")
                 
-                # Scrape each URL
-                for url in urls[:3]:  # Limit to first 3 URLs
-                    logger.info(f"Scraping: {url}")
-                    emails = await self.scrape_page_for_emails(url)
+                # Scrape each URL with prioritization
+                for i, url in enumerate(urls[:5]):  # Limit to first 5 URLs
+                    logger.info(f"Scraping ({i+1}/5): {url}")
+                    emails = await self.scrape_page_for_emails(url, investor_name)
                     if emails:
                         all_emails.update(emails)
                         logger.info(f"Found emails: {emails}")
+                        
+                        # If we found good emails from official sources, we can be less aggressive
+                        if len(emails) >= 2 and any('linkedin.com' in url or 
+                                                   investor_name.lower().replace(' ', '') in url.lower() 
+                                                   for url in [url]):
+                            break
                     
                     # Delay between page scrapes
                     await asyncio.sleep(random.uniform(3, 6))
                 
-                # Delay between queries
-                await asyncio.sleep(random.uniform(5, 10))
+                # If we found emails, reduce delay for next query
+                if all_emails:
+                    await asyncio.sleep(random.uniform(2, 4))
+                else:
+                    await asyncio.sleep(random.uniform(5, 8))
                 
             except Exception as e:
                 logger.error(f"Error processing query '{query}': {e}")
@@ -401,8 +513,8 @@ class InvestorEmailScraper:
             
             results.append(result)
             
-            # Auto-save every 20 investors
-            if i % 20 == 0 or i == total:
+            # Auto-save every 10 investors (more frequent saves)
+            if i % 10 == 0 or i == total:
                 self.save_results(results, output_file)
                 logger.info(f"Progress auto-saved: {i}/{total} completed")
             
@@ -424,7 +536,7 @@ class InvestorEmailScraper:
             writer.writerows(results)
         logger.info(f"Results saved to {filepath}")
 
-# Flask routes
+# Flask routes (keeping the same as before)
 @app.route('/')
 def index():
     return render_template('index.html', status=task_status)
@@ -540,7 +652,7 @@ def run_scraping_task(investor_names):
         })
     
     try:
-        scraper = InvestorEmailScraper(delay_range=(10, 20))
+        scraper = InvestorEmailScraper(delay_range=(12, 25))  # Increased delays for better stealth
         
         # Run async task
         loop = asyncio.new_event_loop()
@@ -578,243 +690,12 @@ def run_scraping_task(investor_names):
         if 'loop' in locals() and loop:
             loop.close()
 
-# HTML Template
-@app.route('/template')
-def get_template():
-    return '''
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Investor Email Scraper</title>
-    <style>
-        body {
-            font-family: Arial, sans-serif;
-            max-width: 800px;
-            margin: 0 auto;
-            padding: 20px;
-            background-color: #f5f5f5;
-        }
-        .container {
-            background: white;
-            padding: 30px;
-            border-radius: 10px;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-        }
-        .progress-bar {
-            width: 100%;
-            height: 20px;
-            background-color: #e0e0e0;
-            border-radius: 10px;
-            overflow: hidden;
-            margin: 10px 0;
-        }
-        .progress {
-            height: 100%;
-            background-color: #4CAF50;
-            transition: width 0.3s ease;
-        }
-        .status {
-            margin: 20px 0;
-            padding: 15px;
-            border-radius: 5px;
-            background-color: #f0f8ff;
-            border-left: 4px solid #2196F3;
-        }
-        .error {
-            background-color: #ffe6e6;
-            border-left-color: #f44336;
-        }
-        .success {
-            background-color: #e8f5e8;
-            border-left-color: #4CAF50;
-        }
-        button {
-            background-color: #2196F3;
-            color: white;
-            padding: 10px 20px;
-            border: none;
-            border-radius: 5px;
-            cursor: pointer;
-            margin: 5px;
-        }
-        button:hover {
-            background-color: #1976D2;
-        }
-        button:disabled {
-            background-color: #cccccc;
-            cursor: not-allowed;
-        }
-        .file-input {
-            margin: 20px 0;
-            padding: 10px;
-            border: 2px dashed #ccc;
-            border-radius: 5px;
-            text-align: center;
-        }
-        input[type="file"] {
-            margin: 10px 0;
-        }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <h1>🔍 Investor Email Scraper</h1>
-        
-        <div class="file-input">
-            <h3>Upload Investor List</h3>
-            <input type="file" id="fileInput" accept=".csv,.xlsx" />
-            <button onclick="uploadFile()">Upload File</button>
-            <p><small>Upload a CSV or Excel file with investor names in the first column</small></p>
-        </div>
-        
-        <div id="fileInfo" style="display: none;">
-            <h3>File Information</h3>
-            <p>Investors found: <span id="investorCount">0</span></p>
-            <div id="investorPreview"></div>
-            <button onclick="startScraping()" id="startBtn">Start Scraping</button>
-        </div>
-        
-        <div class="status" id="statusDiv" style="display: none;">
-            <h3>Scraping Status</h3>
-            <div class="progress-bar">
-                <div class="progress" id="progressBar" style="width: 0%"></div>
-            </div>
-            <p>Progress: <span id="progressText">0/0</span></p>
-            <p>Current: <span id="currentInvestor">-</span></p>
-            <p>Time elapsed: <span id="timeElapsed">0s</span></p>
-            <p>Emails found: <span id="emailsFound">0</span></p>
-            <button onclick="stopScraping()" id="stopBtn">Stop Scraping</button>
-        </div>
-        
-        <div id="resultsDiv" style="display: none;">
-            <h3>✅ Results Ready</h3>
-            <button onclick="downloadResults()" id="downloadBtn">Download Results</button>
-        </div>
-    </div>
-
-    <script>
-        let currentFilename = '';
-        let resultsFilename = '';
-        let startTime = null;
-        let statusInterval = null;
-        
-        function uploadFile() {
-            const fileInput = document.getElementById('fileInput');
-            const file = fileInput.files[0];
-            
-            if (!file) {
-                alert('Please select a file');
-                return;
-            }
-            
-            const formData = new FormData();
-            formData.append('file', file);
-            
-            fetch('/upload', {
-                method: 'POST',
-                body: formData
-            })
-            .then(response => response.json())
-            .then(data => {
-                if (data.success) {
-                    currentFilename = data.filename;
-                    document.getElementById('investorCount').textContent = data.count;
-                    document.getElementById('investorPreview').innerHTML = 
-                        '<p><strong>Preview:</strong> ' + data.preview.join(', ') + 
-                        (data.count > 10 ? '...' : '') + '</p>';
-                    document.getElementById('fileInfo').style.display = 'block';
-                } else {
-                    alert('Error: ' + data.error);
-                }
-            })
-            .catch(error => {
-                alert('Upload failed: ' + error);
-            });
-        }
-        
-        function startScraping() {
-            fetch('/start_scraping', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({filename: currentFilename})
-            })
-            .then(response => response.json())
-            .then(data => {
-                if (data.success) {
-                    document.getElementById('statusDiv').style.display = 'block';
-                    document.getElementById('startBtn').disabled = true;
-                    startTime = new Date();
-                    
-                    // Start polling for status updates
-                    statusInterval = setInterval(updateStatus, 2000);
-                } else {
-                    alert('Error: ' + data.error);
-                }
-            })
-            .catch(error => {
-                alert('Failed to start scraping: ' + error);
-            });
-        }
-        
-        function updateStatus() {
-            fetch('/status')
-            .then(response => response.json())
-            .then(status => {
-                const progress = (status.progress / status.total) * 100;
-                document.getElementById('progressBar').style.width = progress + '%';
-                document.getElementById('progressText').textContent = status.progress + '/' + status.total;
-                document.getElementById('currentInvestor').textContent = status.current_investor;
-                document.getElementById('emailsFound').textContent = status.emails_found;
-                
-                // Update time elapsed
-                if (startTime) {
-                    const elapsed = Math.floor((new Date() - startTime) / 1000);
-                    document.getElementById('timeElapsed').textContent = elapsed + 's';
-                }
-                
-                if (!status.running) {
-                    clearInterval(statusInterval);
-                    resultsFilename = status.results_file;
-                    document.getElementById('resultsDiv').style.display = 'block';
-                    document.getElementById('statusDiv').classList.add('success');
-                }
-            })
-            .catch(error => {
-                console.error('Status update failed:', error);
-            });
-        }
-        
-        function stopScraping() {
-            fetch('/stop_scraping', {
-                method: 'POST'
-            })
-            .then(response => response.json())
-            .then(data => {
-                if (data.success) {
-                    clearInterval(statusInterval);
-                    alert('Scraping stopped');
-                }
-            });
-        }
-        
-        function downloadResults() {
-            if (resultsFilename) {
-                window.location.href = '/download/' + resultsFilename;
-            }
-        }
-    </script>
-</body>
-</html>'''
-
+# HTML Template (keeping the same as before)
 if __name__ == '__main__':
     # Create templates directory and file
     os.makedirs('templates', exist_ok=True)
     
-    # Save the template
+    # Save the template (same as your original)
     template_content = '''<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -889,6 +770,39 @@ if __name__ == '__main__':
         input[type="file"] {
             margin: 10px 0;
         }
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            margin: 20px 0;
+        }
+        .stat-card {
+            background: #f8f9fa;
+            padding: 15px;
+            border-radius: 8px;
+            text-align: center;
+        }
+        .stat-number {
+            font-size: 2em;
+            font-weight: bold;
+            color: #2196F3;
+        }
+        .log-container {
+            max-height: 300px;
+            overflow-y: auto;
+            background: #f8f9fa;
+            padding: 15px;
+            border-radius: 5px;
+            margin: 20px 0;
+            font-family: monospace;
+            font-size: 12px;
+        }
+        .preview {
+            background: #f8f9fa;
+            padding: 15px;
+            border-radius: 5px;
+            margin: 10px 0;
+        }
     </style>
 </head>
 <body>
@@ -899,41 +813,82 @@ if __name__ == '__main__':
             <h3>Upload Investor List</h3>
             <input type="file" id="fileInput" accept=".csv,.xlsx" />
             <button onclick="uploadFile()">Upload File</button>
-            <p><small>Upload a CSV or Excel file with investor names in the first column</small></p>
+            <p><small>Supported formats: CSV, Excel (.xlsx)</small></p>
         </div>
-        
-        <div id="fileInfo" style="display: none;">
-            <h3>File Information</h3>
-            <p>Investors found: <span id="investorCount">0</span></p>
-            <div id="investorPreview"></div>
+
+        <div id="filePreview" style="display: none;">
+            <h3>File Preview</h3>
+            <div class="preview">
+                <p><strong>File:</strong> <span id="fileName"></span></p>
+                <p><strong>Total Investors:</strong> <span id="totalCount"></span></p>
+                <div id="previewList"></div>
+            </div>
             <button onclick="startScraping()" id="startBtn">Start Scraping</button>
         </div>
-        
-        <div class="status" id="statusDiv" style="display: none;">
-            <h3>Scraping Status</h3>
+
+        <div id="scrapingStatus" style="display: none;">
+            <h3>Scraping Progress</h3>
+            <div class="stats">
+                <div class="stat-card">
+                    <div class="stat-number" id="progressCount">0</div>
+                    <div>Processed</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-number" id="totalProgress">0</div>
+                    <div>Total</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-number" id="emailsFound">0</div>
+                    <div>Emails Found</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-number" id="successRate">0%</div>
+                    <div>Success Rate</div>
+                </div>
+            </div>
+            
             <div class="progress-bar">
                 <div class="progress" id="progressBar" style="width: 0%"></div>
             </div>
-            <p>Progress: <span id="progressText">0/0</span></p>
-            <p>Current: <span id="currentInvestor">-</span></p>
-            <p>Time elapsed: <span id="timeElapsed">0s</span></p>
-            <p>Emails found: <span id="emailsFound">0</span></p>
-            <button onclick="stopScraping()" id="stopBtn">Stop Scraping</button>
+            
+            <div class="status" id="currentStatus">
+                <strong>Current:</strong> <span id="currentInvestor">Ready to start...</span>
+            </div>
+
+            <div class="log-container" id="logContainer">
+                <div>Scraping logs will appear here...</div>
+            </div>
+
+            <button onclick="stopScraping()" id="stopBtn" style="background-color: #f44336;">Stop Scraping</button>
+            <button onclick="downloadResults()" id="downloadBtn" style="display: none;">Download Results</button>
         </div>
-        
-        <div id="resultsDiv" style="display: none;">
-            <h3>✅ Results Ready</h3>
-            <button onclick="downloadResults()" id="downloadBtn">Download Results</button>
+
+        <div id="completedStatus" style="display: none;">
+            <div class="status success">
+                <h3>✅ Scraping Completed!</h3>
+                <p>Successfully processed all investors. You can download the results below.</p>
+                <button onclick="downloadResults()" class="download-btn">Download Results CSV</button>
+                <button onclick="resetApp()" style="background-color: #666;">Start New Scraping</button>
+            </div>
         </div>
     </div>
 
     <script>
-        let currentFilename = '';
-        let resultsFilename = '';
-        let startTime = null;
-        let statusInterval = null;
-        
-        function uploadFile() {
+        let uploadedFile = null;
+        let scrapingInterval = null;
+        let logs = [];
+
+        function addLog(message) {
+            const timestamp = new Date().toLocaleTimeString();
+            logs.push(`[${timestamp}] ${message}`);
+            if (logs.length > 100) logs.shift(); // Keep only last 100 logs
+            
+            const logContainer = document.getElementById('logContainer');
+            logContainer.innerHTML = logs.join('<br>');
+            logContainer.scrollTop = logContainer.scrollHeight;
+        }
+
+        async function uploadFile() {
             const fileInput = document.getElementById('fileInput');
             const file = fileInput.files[0];
             
@@ -941,111 +896,175 @@ if __name__ == '__main__':
                 alert('Please select a file');
                 return;
             }
-            
+
             const formData = new FormData();
             formData.append('file', file);
-            
-            fetch('/upload', {
-                method: 'POST',
-                body: formData
-            })
-            .then(response => response.json())
-            .then(data => {
-                if (data.success) {
-                    currentFilename = data.filename;
-                    document.getElementById('investorCount').textContent = data.count;
-                    document.getElementById('investorPreview').innerHTML = 
-                        '<p><strong>Preview:</strong> ' + data.preview.join(', ') + 
-                        (data.count > 10 ? '...' : '') + '</p>';
-                    document.getElementById('fileInfo').style.display = 'block';
-                } else {
-                    alert('Error: ' + data.error);
-                }
-            })
-            .catch(error => {
-                alert('Upload failed: ' + error);
-            });
-        }
-        
-        function startScraping() {
-            fetch('/start_scraping', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({filename: currentFilename})
-            })
-            .then(response => response.json())
-            .then(data => {
-                if (data.success) {
-                    document.getElementById('statusDiv').style.display = 'block';
-                    document.getElementById('startBtn').disabled = true;
-                    startTime = new Date();
+
+            try {
+                const response = await fetch('/upload', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                const result = await response.json();
+
+                if (result.success) {
+                    uploadedFile = result.filename;
+                    document.getElementById('fileName').textContent = file.name;
+                    document.getElementById('totalCount').textContent = result.count;
                     
-                    // Start polling for status updates
-                    statusInterval = setInterval(updateStatus, 2000);
+                    const previewList = document.getElementById('previewList');
+                    previewList.innerHTML = '<strong>Preview (first 10):</strong><br>' + 
+                        result.preview.map(name => `• ${name}`).join('<br>');
+                    
+                    document.getElementById('filePreview').style.display = 'block';
+                    addLog(`File uploaded successfully: ${result.count} investors found`);
                 } else {
-                    alert('Error: ' + data.error);
+                    alert('Upload failed: ' + result.error);
                 }
-            })
-            .catch(error => {
-                alert('Failed to start scraping: ' + error);
-            });
-        }
-        
-        function updateStatus() {
-            fetch('/status')
-            .then(response => response.json())
-            .then(status => {
-                const progress = (status.progress / status.total) * 100;
-                document.getElementById('progressBar').style.width = progress + '%';
-                document.getElementById('progressText').textContent = status.progress + '/' + status.total;
-                document.getElementById('currentInvestor').textContent = status.current_investor;
-                document.getElementById('emailsFound').textContent = status.emails_found;
-                
-                // Update time elapsed
-                if (startTime) {
-                    const elapsed = Math.floor((new Date() - startTime) / 1000);
-                    document.getElementById('timeElapsed').textContent = elapsed + 's';
-                }
-                
-                if (!status.running) {
-                    clearInterval(statusInterval);
-                    resultsFilename = status.results_file;
-                    document.getElementById('resultsDiv').style.display = 'block';
-                    document.getElementById('statusDiv').classList.add('success');
-                }
-            })
-            .catch(error => {
-                console.error('Status update failed:', error);
-            });
-        }
-        
-        function stopScraping() {
-            fetch('/stop_scraping', {
-                method: 'POST'
-            })
-            .then(response => response.json())
-            .then(data => {
-                if (data.success) {
-                    clearInterval(statusInterval);
-                    alert('Scraping stopped');
-                }
-            });
-        }
-        
-        function downloadResults() {
-            if (resultsFilename) {
-                window.location.href = '/download/' + resultsFilename;
+            } catch (error) {
+                alert('Upload error: ' + error.message);
             }
         }
+
+        async function startScraping() {
+            if (!uploadedFile) {
+                alert('Please upload a file first');
+                return;
+            }
+
+            try {
+                const response = await fetch('/start_scraping', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ filename: uploadedFile })
+                });
+
+                const result = await response.json();
+
+                if (result.success) {
+                    document.getElementById('filePreview').style.display = 'none';
+                    document.getElementById('scrapingStatus').style.display = 'block';
+                    document.getElementById('startBtn').disabled = true;
+                    
+                    addLog('Scraping started...');
+                    startStatusUpdates();
+                } else {
+                    alert('Failed to start scraping: ' + result.error);
+                }
+            } catch (error) {
+                alert('Error: ' + error.message);
+            }
+        }
+
+        async function stopScraping() {
+            try {
+                const response = await fetch('/stop_scraping', {
+                    method: 'POST'
+                });
+
+                const result = await response.json();
+                if (result.success) {
+                    addLog('Scraping stopped by user');
+                    stopStatusUpdates();
+                }
+            } catch (error) {
+                console.error('Error stopping scraping:', error);
+            }
+        }
+
+        function startStatusUpdates() {
+            scrapingInterval = setInterval(updateStatus, 2000);
+        }
+
+        function stopStatusUpdates() {
+            if (scrapingInterval) {
+                clearInterval(scrapingInterval);
+                scrapingInterval = null;
+            }
+        }
+
+        async function updateStatus() {
+            try {
+                const response = await fetch('/status');
+                const status = await response.json();
+
+                document.getElementById('progressCount').textContent = status.progress;
+                document.getElementById('totalProgress').textContent = status.total;
+                document.getElementById('emailsFound').textContent = status.emails_found;
+                
+                const successRate = status.progress > 0 ? 
+                    Math.round((status.emails_found / status.progress) * 100) : 0;
+                document.getElementById('successRate').textContent = successRate + '%';
+
+                const progressPercent = status.total > 0 ? 
+                    (status.progress / status.total) * 100 : 0;
+                document.getElementById('progressBar').style.width = progressPercent + '%';
+
+                document.getElementById('currentInvestor').textContent = 
+                    status.current_investor || 'Processing...';
+
+                // Add log for current investor
+                if (status.current_investor && status.current_investor !== 'Completed') {
+                    addLog(`Processing: ${status.current_investor}`);
+                }
+
+                if (!status.running) {
+                    stopStatusUpdates();
+                    
+                    if (status.current_investor === 'Completed') {
+                        document.getElementById('scrapingStatus').style.display = 'none';
+                        document.getElementById('completedStatus').style.display = 'block';
+                        addLog('✅ Scraping completed successfully!');
+                    } else {
+                        addLog('❌ Scraping stopped or encountered an error');
+                        document.getElementById('downloadBtn').style.display = 'inline-block';
+                    }
+                }
+
+            } catch (error) {
+                console.error('Error updating status:', error);
+                addLog('Error updating status: ' + error.message);
+            }
+        }
+
+        function downloadResults() {
+            // Get the results filename from the current status
+            fetch('/status')
+                .then(response => response.json())
+                .then(status => {
+                    if (status.results_file) {
+                        window.location.href = `/download/${status.results_file}`;
+                        addLog(`Downloading results: ${status.results_file}`);
+                    } else {
+                        alert('No results file available');
+                    }
+                })
+                .catch(error => {
+                    alert('Error downloading results: ' + error.message);
+                });
+        }
+
+        function resetApp() {
+            uploadedFile = null;
+            logs = [];
+            document.getElementById('filePreview').style.display = 'none';
+            document.getElementById('scrapingStatus').style.display = 'none';
+            document.getElementById('completedStatus').style.display = 'none';
+            document.getElementById('fileInput').value = '';
+            document.getElementById('startBtn').disabled = false;
+            addLog('Application reset - ready for new upload');
+        }
+
+        // Initialize
+        document.addEventListener('DOMContentLoaded', function() {
+            addLog('Investor Email Scraper initialized');
+        });
     </script>
 </body>
-</html>'''
-    
-    with open('templates/index.html', 'w') as f:
-        f.write(template_content)
-    
-    # Get port from environment variable (Railway sets this automatically)
+</html>
+'''
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=True)
